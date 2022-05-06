@@ -3,6 +3,7 @@
 
 #include <linux/kernel.h>
 #include <linux/list.h>
+
 struct taurus_rvgc_res_msg;
 
 typedef struct taurus_event_list {
@@ -15,13 +16,24 @@ typedef struct taurus_event_list {
 }taurus_event_list_t;
 
 typedef struct rcar_cluster_device {
-        struct device* dev;
-
+        struct device dev;
+        struct cdev cdev;
         struct rpmsg_device* rpdev;
+
+        struct rpmsg_channel_info chinfo;
+
+	    struct mutex ept_lock;
+	    struct rpmsg_endpoint *ept;
 
         struct list_head taurus_event_list_head;
         rwlock_t event_list_lock;
 
-}rcar_cluster_device_t;
+
+        /* ?? */
+        spinlock_t queue_lock;
+	    struct sk_buff_head queue;
+	    wait_queue_head_t readq;
+
+} rcar_cluster_device_t;
 
 #endif /* __RCAR_CLUSTER_DRV_H__ */
