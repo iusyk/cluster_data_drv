@@ -21,7 +21,6 @@
 #include "linux/cdev.h"
 #include "r_taurus_cluster_protocol.h"
 #include "rcar_cluster_drv.h"
-/*#include "rcar_cluster_drv.h"*/
 
 #pragma GCC optimize ("-Og")
 
@@ -75,11 +74,7 @@ typedef struct rcar_cluster_eptdev {
 
 static dev_t rpmsg_major;
 static struct class *rpmsg_class;
-/*
-static DEFINE_IDA(rpmsg_ctrl_ida);
-static DEFINE_IDA(rpmsg_ept_ida);
-static DEFINE_IDA(rpmsg_minor_ida);
-*/
+
 #define dev_to_rcar_eptdev(dev) container_of(dev, rcar_cluster_eptdev_t, dev)
 #define cdev_to_rcar_eptdev(i_cdev) container_of(i_cdev, rcar_cluster_eptdev_t, cdev)
 
@@ -125,7 +120,7 @@ static const struct file_operations rpmsg_eptdev_fops = {
 	.write_iter = rpmsg_eptdev_write_iter,
 	/*.poll = rpmsg_eptdev_poll,*/
 	.unlocked_ioctl = rpmsg_eptdev_ioctl,
-	/*.compat_ioctl = compat_ptr_ioctl,*/
+	.compat_ioctl = compat_ptr_ioctl,
 };
 
 static const struct file_operations rpmsg_ctrldev_fops = {
@@ -144,27 +139,27 @@ static int cluster_taurus_get_uniq_id(void) {
 
 static int rpmsg_ctrldev_release(struct inode *inode, struct file *filp)
 {
-	rcar_cluster_eptdev_t *clusterdev= cdev_to_rcar_eptdev(inode->i_cdev);
+	rcar_cluster_eptdev_t *clusterept= cdev_to_rcar_eptdev(inode->i_cdev);
 
-	put_device(&clusterdev->dev);
+	put_device(&clusterept->dev);
 
 	return 0;
 }
 
 static int rpmsg_ctrldev_open(struct inode *inode, struct file *filp)
 {
+	int ret = 0;
+	void * p=NULL;
 	rcar_cluster_device_t *clusterdev = cdev_to_clusterdev(inode->i_cdev);
 
-	get_device(&clusterdev->dev);
+	p = get_device(&clusterdev->dev);
 	filp->private_data = clusterdev;
-
-    printk("cluster: !!! rpmsg_ctrldev_open");
 	return 0;
 }
 
 static void rpmsg_clusterdev_release_device(struct device *dev)
 {
-	rcar_cluster_device_t *clusterdvc = dev_to_clusterdev(dev);
+	rcar_cluster_eptdev_t *clusterdvc = dev_to_rcar_eptdev(dev);
 
 	ida_simple_remove(&rpmsg_ctrl_ida, dev->id);
 	ida_simple_remove(&rpmsg_minor_ida, MINOR(dev->devt));
@@ -175,8 +170,6 @@ static int send_msg(struct rpmsg_device *rpdev, taurus_cluster_data_t *data, tau
 	int ret = 0;
 	R_TAURUS_CmdMsg_t msg;
 	struct taurus_event_list* event;
-
-	printk("cluster !!! Sending msg !!!");
 
 	event = devm_kzalloc(&rpdev->dev, sizeof(*event), GFP_KERNEL);
     if (!event) {
@@ -203,57 +196,46 @@ static int send_msg(struct rpmsg_device *rpdev, taurus_cluster_data_t *data, tau
 	msg.Id = cluster_taurus_get_uniq_id();
 	msg.Channel = 0x80;
 	msg.Cmd = R_TAURUS_CMD_IOCTL;
-	msg.Par1 = 2;
-	msg.Par2 = 4;
-	msg.Par3 = 6;
+	msg.Par1 = data->rpm;
+	msg.Par2 = data->speed;
+	msg.Par3 = 0;
 
     event->id = msg.Id;
     init_completion(&event->ack);
-
-	printk("cluster: Init ack!\n");
-    
 	init_completion(&event->completed);
-	
-	printk("cluster: Init completed!\n");
 
     write_lock(&clusterdrv->event_list_lock);
     list_add(&event->list, &clusterdrv->taurus_event_list_head);
     write_unlock(&clusterdrv->event_list_lock);
 
-
-	printk("cluster !!! Params: %d -> %d!\n",(int)msg.Par2, (int)msg.Par3);
-
 	ret = rpmsg_send(rpdev->ept, &msg, sizeof(msg));
 	
 	if (ret){
 		dev_err(&rpdev->dev, "rpmsg_send failed: %d\n", ret);
-		printk("Send error ack!\n");
+		goto end;
 	}
 	
 	ret = wait_for_completion_interruptible(&event->ack);
 	if (ret == -ERESTARTSYS) {
 		/* we were interrupted */
         dev_err(&rpdev->dev, "%s:%d Interrupted while waiting taurus ACK (%d)\n", __FUNCTION__, __LINE__, ret);
-		printk("!!! FAIL ack!\n");
+		goto end;
 	}
 	else if(wait_for_completion_interruptible(&event->completed) == -ERESTARTSYS){
 		dev_err(&rpdev->dev, "%s:%d Interrupted while waiting taurus response (%d)\n", __FUNCTION__, __LINE__, ret);
-		printk("!!! FAIL completes!\n");
+		goto end;
 	}
 	else {
-		printk("!!! Copying result!\n");
 		memcpy(res_msg, event->result, sizeof(taurus_cluster_res_msg_t));
-		printk("!!! Copied result!\n");
 	}
 
 	write_lock(&clusterdrv->event_list_lock);
 	list_del(&event->list);
 	write_unlock(&clusterdrv->event_list_lock);
 
+end:
 	devm_kfree(&rpdev->dev, event->result);
 	devm_kfree(&rpdev->dev, event);	
-
-	printk("!!! CLUSTER UNLOK MSG");
 
 	return ret;
 }
@@ -272,23 +254,16 @@ static int rpmsg_cluster_cb(struct rpmsg_device* rpdev, void* data, int len,
 	rcar_cluster_device_t* clusterdrv = (rcar_cluster_device_t*)dev_get_drvdata(&rpdev->dev);
 	uint32_t res_id = res->hdr.Id;
 
-	printk("!!! CLUSTER CALLBACK res %d!\n", res->hdr.Result);
-
-	if ((res->hdr.Result == R_TAURUS_CMD_NOP) && (res_id == 0)) {/*necessary send data to cluster*/
-	}
-	else {/*send ACK message*/
+	if (!(res->hdr.Result == R_TAURUS_CMD_NOP && res_id == 0)) {/*necessary send data to cluster*/
+		/*send ACK message*/
 		read_lock(&clusterdrv->event_list_lock);
 		
 		list_for_each_prev(i, &clusterdrv->taurus_event_list_head) {
 			event = list_entry(i, struct taurus_event_list, list);
 			if (event->id == res_id) {
-
 				memcpy(event->result, data, len);
-		
-				printk("!! Copy data for id %d", res_id);
-		
 				if (event->ack_received) {
-					printk("!! COMPLETED");
+					dev_info(&rpdev->dev, "%s:%d Message completed (%d)\n", __FUNCTION__, __LINE__, ret);
 					complete(&event->completed);
 				} else {
 					event->ack_received = 1;
@@ -300,16 +275,7 @@ static int rpmsg_cluster_cb(struct rpmsg_device* rpdev, void* data, int len,
 	}
 	return 0;
 }
-/*
-static void rpmsg_rcar_cluster_release_device(struct device *dev)
-{
-	rcar_cluster_device_t *clusterdvc = dev_to_rcar_cluster(dev);
 
-	ida_simple_remove(&rpmsg_ctrl_ida, dev->id);
-	ida_simple_remove(&rpmsg_minor_ida, MINOR(dev->devt));
-	kfree(clusterdvc);
-}
-*/
 static int rpmsg_cluster_probe(struct rpmsg_device* rpdev)
 {
 	rcar_cluster_device_t *clusterdvc = NULL;
@@ -323,8 +289,7 @@ static int rpmsg_cluster_probe(struct rpmsg_device* rpdev)
 		.rpm = 1000,
 		.speed = 40,
 	};
-	
-	printk("rpmsg_cluster_probe!!!!!/n");
+	dev_info(&rpdev->dev, "cluster: %s:%d probe\n", __FUNCTION__, __LINE__);
 
 	/*
 	this condition just because of error during the call of insmode
@@ -353,7 +318,7 @@ static int rpmsg_cluster_probe(struct rpmsg_device* rpdev)
 	}
 	
 	clusterdvc->dev.devt = MKDEV(MAJOR(rpmsg_major), ret);
-	
+
 	ret = ida_simple_get(&rpmsg_ctrl_ida, 0, 0, GFP_KERNEL);
 	if (ret < 0){
 		goto free_minor_ida;
@@ -362,21 +327,17 @@ static int rpmsg_cluster_probe(struct rpmsg_device* rpdev)
 	clusterdvc->dev.id = ret;
 
 	dev_set_name(&clusterdvc->dev, "rpmsg_ctrl%d", ret);
-	
 	ret = cdev_device_add(&clusterdvc->cdev, &clusterdvc->dev);
 	if (ret) {
 		goto free_ctrl_ida;
 	}
 
 	/* We can now rely on the function for cleanup */
-	
 	clusterdvc->dev.release = rpmsg_clusterdev_release_device;
-	
 	dev_set_drvdata(&rpdev->dev, clusterdvc);
 	
     INIT_LIST_HEAD(&clusterdvc->taurus_event_list_head);
     rwlock_init(&clusterdvc->event_list_lock);
-
 	/*send a ping of message with dummy data*/
 	send_msg(rpdev, &cluster_data, &res_msg);
 
@@ -397,15 +358,15 @@ static int rpmsg_eptdev_destroy(struct device *dev, void *data)
 {
 	rcar_cluster_eptdev_t *eptdev = dev_to_rcar_eptdev(dev);
 
-	mutex_lock(&eptdev->ept_lock);
+	/*mutex_lock(&eptdev->ept_lock);*/
 	if (eptdev->ept) {
 		rpmsg_destroy_ept(eptdev->ept);
 		eptdev->ept = NULL;
 	}
-	mutex_unlock(&eptdev->ept_lock);
+	/*mutex_unlock(&eptdev->ept_lock);*/
 
 	/* wake up any blocked readers */
-	wake_up_interruptible(&eptdev->readq);
+	/*wake_up_interruptible(&eptdev->readq);*/
 
 	cdev_device_del(&eptdev->cdev, &eptdev->dev);
 	put_device(&eptdev->dev);
@@ -418,8 +379,6 @@ static void rpmsg_cluster_remove(struct rpmsg_device *rpdev)
 	rcar_cluster_device_t *data = dev_get_drvdata(&rpdev->dev);
 	int ret = 0;
 
-	printk("rpmsg_cluster_remove");
-
 	ret = device_for_each_child(&data->dev, NULL, rpmsg_eptdev_destroy);
 	if (ret)
 		dev_warn(&rpdev->dev, "failed to nuke endpoints: %d\n", ret);
@@ -430,13 +389,11 @@ static void rpmsg_cluster_remove(struct rpmsg_device *rpdev)
     return;
 }
 
-static int /*__init*/ cluster_drv_init(void)
+static int __init cluster_drv_init(void)
 {
 	int ret = 0;
 
-    printk("!!! cluster_drv_init!\n");
-
-	ret = alloc_chrdev_region(&rpmsg_major, 0, RPMSG_DEV_MAX, "rpmsg");
+    ret = alloc_chrdev_region(&rpmsg_major, 0, RPMSG_DEV_MAX, "rpmsg");
 	if (ret < 0) {
 		pr_err("failed to allocate char dev region\n");
 		return ret;
@@ -450,10 +407,7 @@ static int /*__init*/ cluster_drv_init(void)
 		return PTR_ERR(rpmsg_class);
 	}
 
-	printk("!!! cluster_drv_init - class created!\n");
-
 	ret =  register_rpmsg_driver(&rpmsg_cluster_drv);
-
 	if (ret < 0) {
 		pr_err("failed to register cluster_drv_init driver\n");
 		class_destroy(rpmsg_class);
@@ -464,31 +418,26 @@ static int /*__init*/ cluster_drv_init(void)
 }
 postcore_initcall(cluster_drv_init);
 
-static void /*__exit*/ cluster_drv_exit(void)
+static void __exit cluster_drv_exit(void)
 {
     unregister_rpmsg_driver(&rpmsg_cluster_drv);
 	class_destroy(rpmsg_class);
 	unregister_chrdev_region(rpmsg_major, RPMSG_DEV_MAX);
-
-    printk("!!! cluster_drv_exit! end\n");
 }
 
-/*  */
-/*
 static void rpmsg_eptdev_release_device(struct device *dev)
 {
-	struct rpmsg_eptdev *eptdev = dev_to_eptdev(dev);
+	rcar_cluster_eptdev_t *eptdev = dev_to_rcar_eptdev(dev);
 
 	ida_simple_remove(&rpmsg_ept_ida, dev->id);
 	ida_simple_remove(&rpmsg_minor_ida, MINOR(eptdev->dev.devt));
 	kfree(eptdev);
 }
-*/
 
-static int rpmsg_eptdev_create(struct rpmsg_ctrldev *ctrldev,
+static int rpmsg_eptdev_create(rcar_cluster_device_t *clusterdvc,
 			       struct rpmsg_channel_info chinfo)
 {
-	struct rpmsg_device *rpdev = ctrldev->rpdev;
+	struct rpmsg_device *rpdev = clusterdvc->rpdev;
 	rcar_cluster_eptdev_t *eptdev;
 	struct device *dev;
 	int ret;
@@ -500,15 +449,17 @@ static int rpmsg_eptdev_create(struct rpmsg_ctrldev *ctrldev,
 	dev = &eptdev->dev;
 	eptdev->rpdev = rpdev;
 	eptdev->chinfo = chinfo;
+	eptdev->ept = clusterdvc->ept;
 
-	mutex_init(&eptdev->ept_lock);
+	/*mutex_init(&eptdev->ept_lock);
 	spin_lock_init(&eptdev->queue_lock);
 	skb_queue_head_init(&eptdev->queue);
 	init_waitqueue_head(&eptdev->readq);
-
+*/
 	device_initialize(dev);
+
 	dev->class = rpmsg_class;
-	dev->parent = &ctrldev->dev;
+	dev->parent = &clusterdvc->dev;
 	/*dev->groups = rpmsg_eptdev_groups;*//*I am not sure of it is necessary*/
 	dev_set_drvdata(dev, eptdev);
 
@@ -516,23 +467,24 @@ static int rpmsg_eptdev_create(struct rpmsg_ctrldev *ctrldev,
 	eptdev->cdev.owner = THIS_MODULE;
 
 	ret = ida_simple_get(&rpmsg_minor_ida, 0, RPMSG_DEV_MAX, GFP_KERNEL);
-	if (ret < 0)
+	if (ret < 0){
 		goto free_eptdev;
+	};
 	dev->devt = MKDEV(MAJOR(rpmsg_major), ret);
 
 	ret = ida_simple_get(&rpmsg_ept_ida, 0, 0, GFP_KERNEL);
-	if (ret < 0)
+	if (ret < 0){
 		goto free_minor_ida;
+	}
 	dev->id = ret;
 	dev_set_name(dev, "rpmsg%d", ret);
-
+	
 	ret = cdev_device_add(&eptdev->cdev, &eptdev->dev);
-	if (ret)
+	if (ret){
 		goto free_ept_ida;
-
+	}	
 	/* We can now rely on the release function for cleanup */
-	/*dev->release = rpmsg_eptdev_release_device;*/
-
+	dev->release = rpmsg_eptdev_release_device;
 	return ret;
 
 free_ept_ida:
@@ -549,81 +501,86 @@ free_eptdev:
 static long rpmsg_ctrldev_ioctl(struct file *fp, unsigned int cmd,
 				unsigned long arg)
 {
-	struct rpmsg_ctrldev *ctrldev = fp->private_data;
+	rcar_cluster_device_t *clusterdvc = fp->private_data;
 	void __user *argp = (void __user *)arg;
 	struct rpmsg_endpoint_info eptinfo;
 	struct rpmsg_channel_info chinfo;
 
-	if (cmd != RPMSG_CREATE_EPT_IOCTL)
+	if (cmd != RPMSG_CREATE_EPT_IOCTL){
 		return -EINVAL;
+	}
 
-	if (copy_from_user(&eptinfo, argp, sizeof(eptinfo)))
+	if (copy_from_user(&eptinfo, argp, sizeof(eptinfo))){
 		return -EFAULT;
-
+	}
+	
 	memcpy(chinfo.name, eptinfo.name, RPMSG_NAME_SIZE);
 	chinfo.name[RPMSG_NAME_SIZE-1] = '\0';
 	chinfo.src = eptinfo.src;
 	chinfo.dst = eptinfo.dst;
-
-	return rpmsg_eptdev_create(ctrldev, chinfo);
+	
+	return rpmsg_eptdev_create(clusterdvc, chinfo);
 };
 
 static int rpmsg_eptdev_open(struct inode *inode, struct file *filp)
 {
-	printk("rpmsg_eptdev_open");
-/*	struct rpmsg_eptdev *eptdev = cdev_to_eptdev(inode->i_cdev);
+	rcar_cluster_eptdev_t *eptdev = cdev_to_rcar_eptdev(inode->i_cdev);
 	struct rpmsg_endpoint *ept;
 	struct rpmsg_device *rpdev = eptdev->rpdev;
 	struct device *dev = &eptdev->dev;
 
-	if (eptdev->ept)
+	if (eptdev->ept){
 		return -EBUSY;
+	}
 
 	get_device(dev);
 
-	ept = rpmsg_create_ept(rpdev, rpmsg_ept_cb, eptdev, eptdev->chinfo);
+	/*ept = rpmsg_create_ept(rpdev, rpmsg_ept_cb, eptdev, eptdev->chinfo);
 	if (!ept) {
 		dev_err(dev, "failed to open %s\n", eptdev->chinfo.name);
 		put_device(dev);
 		return -EINVAL;
 	}
-
+	*/
+	
 	eptdev->ept = ept;
 	filp->private_data = eptdev;
-*/
+
 	return 0;
 }
 
 
 static int rpmsg_eptdev_release(struct inode *inode, struct file *filp)
 {
-/*	struct rpmsg_eptdev *eptdev = cdev_to_eptdev(inode->i_cdev);
+	rcar_cluster_eptdev_t *eptdev = cdev_to_rcar_eptdev(inode->i_cdev);/*cdev_to_eptdev(inode->i_cdev);*/
 	struct device *dev = &eptdev->dev;
 
-	/ Close the endpoint, if it's not already destroyed by the parent /
-	mutex_lock(&eptdev->ept_lock);
+	/* Close the endpoint, if it's not already destroyed by the parent */
+	/*mutex_lock(&eptdev->ept_lock);*/
 	if (eptdev->ept) {
 		rpmsg_destroy_ept(eptdev->ept);
 		eptdev->ept = NULL;
 	}
-	mutex_unlock(&eptdev->ept_lock);
+	/*mutex_unlock(&eptdev->ept_lock);8/
 
 	/ Discard all SKBs /
 	skb_queue_purge(&eptdev->queue);
-
-	put_device(dev);
 */
+	put_device(dev);
+
 	return 0;
 }
 
 static ssize_t rpmsg_eptdev_write_iter(struct kiocb *iocb,
 				       struct iov_iter *from)
 {
-	/*struct file *filp = iocb->ki_filp;
-	struct rpmsg_eptdev *eptdev = filp->private_data;
+	struct file *filp = iocb->ki_filp;
+	rcar_cluster_eptdev_t *eptdev = filp->private_data;
 	size_t len = iov_iter_count(from);
 	void *kbuf;
 	int ret;
+	taurus_cluster_data_t * data = NULL;
+	taurus_cluster_res_msg_t res;
 
 	kbuf = kzalloc(len, GFP_KERNEL);
 	if (!kbuf)
@@ -634,71 +591,44 @@ static ssize_t rpmsg_eptdev_write_iter(struct kiocb *iocb,
 		goto free_kbuf;
 	}
 
+	data = (taurus_cluster_data_t*)kbuf;
+/*
 	if (mutex_lock_interruptible(&eptdev->ept_lock)) {
 		ret = -ERESTARTSYS;
 		goto free_kbuf;
 	}
+*/
+	send_msg(eptdev->rpdev, data, &res);
 
 	if (!eptdev->ept) {
 		ret = -EPIPE;
-		goto unlock_eptdev;
+	/*	goto unlock_eptdev;*/
 	}
 
-	if (filp->f_flags & O_NONBLOCK)
+	/*if (filp->f_flags & O_NONBLOCK)
 		ret = rpmsg_trysendto(eptdev->ept, kbuf, len, eptdev->chinfo.dst);
 	else
-		ret = rpmsg_sendto(eptdev->ept, kbuf, len, eptdev->chinfo.dst);
-
+		ret = rpmsg_sendto(eptdev->ept, kbuf, len, eptdev->chinfo.dst);*/
+/*
 unlock_eptdev:
 	mutex_unlock(&eptdev->ept_lock);
-
+*/
 free_kbuf:
 	kfree(kbuf);
-	return ret < 0 ? ret : len;*/
-	return 0;
+	return ret < 0 ? ret : len;
 }
 
 static long rpmsg_eptdev_ioctl(struct file *fp, unsigned int cmd,
 			       unsigned long arg)
 {
-/*	struct rpmsg_eptdev *eptdev = fp->private_data;
+	rcar_cluster_eptdev_t *eptdev = fp->private_data;
 
-	if (cmd != RPMSG_DESTROY_EPT_IOCTL)
+	if (cmd != RPMSG_DESTROY_EPT_IOCTL){
 		return -EINVAL;
+	};
 
-	return rpmsg_eptdev_destroy(&eptdev->dev, NULL);*/
-	printk("!!! rpmsg_eptdev_ioctl");
-	return 0;
+	return rpmsg_eptdev_destroy(&eptdev->dev, NULL);
 }
-/*
-static int rpmsg_chrdev_init(void)
-{
-	int ret;
-
-	ret = alloc_chrdev_region(&rpmsg_major, 0, RPMSG_DEV_MAX, "rpmsg");
-	if (ret < 0) {
-		pr_err("failed to allocate char dev region\n");
-		return ret;
-	}
-
-	rpmsg_class = class_create(THIS_MODULE, "rpmsg");
-	if (IS_ERR(rpmsg_class)) {
-		pr_err("failed to create rpmsg class\n");
-		unregister_chrdev_region(rpmsg_major, RPMSG_DEV_MAX);
-		return PTR_ERR(rpmsg_class);
-	}
-
-	ret = register_rpmsg_driver(&rpmsg_chrdev_driver);
-	if (ret < 0) {
-		pr_err("failed to register rpmsg driver\n");
-		class_destroy(rpmsg_class);
-		unregister_chrdev_region(rpmsg_major, RPMSG_DEV_MAX);
-	}
-
-	return ret;
-}
-postcore_initcall(rpmsg_chrdev_init);
-*/
 
 MODULE_DEVICE_TABLE(rpmsg, rpmsg_driver_cluster_id_table);
 
@@ -709,6 +639,3 @@ module_exit(cluster_drv_exit);
 MODULE_ALIAS("rpmsg_cluster:rpmsg_chrdev");
 MODULE_DESCRIPTION("Remote processor messaging cluster driver");
 MODULE_LICENSE("GPL v2");
-
-
-
