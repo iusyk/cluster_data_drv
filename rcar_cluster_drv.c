@@ -32,6 +32,9 @@ static DEFINE_IDA(rpmsg_minor_ida);
 
 #define RCAR_CLUSTER_DRM_NAME     "rcar-cluster-drv"
 
+#define RCAR_IO_SPEED  1
+#define RCAR_IO_GEAR   2
+
 
 /**
  * struct rpmsg_ctrldev - control device for instantiating endpoint devices
@@ -148,7 +151,6 @@ static int rpmsg_ctrldev_release(struct inode *inode, struct file *filp)
 
 static int rpmsg_ctrldev_open(struct inode *inode, struct file *filp)
 {
-	int ret = 0;
 	void * p=NULL;
 	rcar_cluster_device_t *clusterdev = cdev_to_clusterdev(inode->i_cdev);
 
@@ -172,14 +174,14 @@ static int send_msg(struct rpmsg_device *rpdev, taurus_cluster_data_t *data, tau
 	struct taurus_event_list* event;
 
 	event = devm_kzalloc(&rpdev->dev, sizeof(*event), GFP_KERNEL);
-    if (!event) {
+    	if (!event) {
 		dev_err(&rpdev->dev, "cluster: %s:%d Can't allocate memory for taurus event\n", __FUNCTION__, __LINE__);
 		return -ENOMEM;
-    }
+    	}
 	event->result = devm_kzalloc(&rpdev->dev, sizeof(*event->result), GFP_KERNEL);
     
 	if (!event->result) {
-        dev_err(&rpdev->dev, "%s:%d Can't allocate memory for taurus event->result\n", __FUNCTION__, __LINE__);
+       	dev_err(&rpdev->dev, "%s:%d Can't allocate memory for taurus event->result\n", __FUNCTION__, __LINE__);
 		devm_kfree(&rpdev->dev, event);
 		return -ENOMEM;
     }
@@ -196,8 +198,9 @@ static int send_msg(struct rpmsg_device *rpdev, taurus_cluster_data_t *data, tau
 	msg.Id = cluster_taurus_get_uniq_id();
 	msg.Channel = 0x80;
 	msg.Cmd = R_TAURUS_CMD_IOCTL;
-	msg.Par1 = data->rpm;
-	msg.Par2 = data->speed;
+	msg.Par1 = data->ioctl_cmd;
+	// if gear , replace the negative value with positive
+	msg.Par2 = data->ioctl_cmd == RCAR_IO_GEAR && data->value < 0 /*it is reverse gear position */? 4 : data->value;
 	msg.Par3 = 0;
 
     event->id = msg.Id;
@@ -247,7 +250,6 @@ end:
 static int rpmsg_cluster_cb(struct rpmsg_device* rpdev, void* data, int len,
 			void* priv, u32 src) {
 	int ret = 0;
-	R_TAURUS_CmdMsg_t msg;
 	struct taurus_event_list* event = NULL;
 	struct taurus_cluster_res_msg* res = (struct taurus_cluster_res_msg*)data;
 	struct list_head* i = NULL;
@@ -280,21 +282,14 @@ static int rpmsg_cluster_probe(struct rpmsg_device* rpdev)
 {
 	rcar_cluster_device_t *clusterdvc = NULL;
 	int ret = 0;
-	R_TAURUS_CmdMsg_t msg;
-	int error = 0;
 	struct device *dev = NULL;
 	taurus_cluster_res_msg_t res_msg;
 
 	taurus_cluster_data_t cluster_data = {
-		.rpm = 1000,
-		.speed = 40,
+		.value = 10,
+		.ioctl_cmd = 1,
 	};
 	dev_info(&rpdev->dev, "cluster: %s:%d probe\n", __FUNCTION__, __LINE__);
-
-	/*
-	this condition just because of error during the call of insmode
-	probe is called repeatedly
-	*/
 
 	clusterdvc = kzalloc(sizeof(*clusterdvc), GFP_KERNEL);
 
@@ -526,7 +521,6 @@ static int rpmsg_eptdev_open(struct inode *inode, struct file *filp)
 {
 	rcar_cluster_eptdev_t *eptdev = cdev_to_rcar_eptdev(inode->i_cdev);
 	struct rpmsg_endpoint *ept;
-	struct rpmsg_device *rpdev = eptdev->rpdev;
 	struct device *dev = &eptdev->dev;
 
 	if (eptdev->ept){
@@ -592,12 +586,7 @@ static ssize_t rpmsg_eptdev_write_iter(struct kiocb *iocb,
 	}
 
 	data = (taurus_cluster_data_t*)kbuf;
-/*
-	if (mutex_lock_interruptible(&eptdev->ept_lock)) {
-		ret = -ERESTARTSYS;
-		goto free_kbuf;
-	}
-*/
+
 	send_msg(eptdev->rpdev, data, &res);
 
 	if (!eptdev->ept) {
@@ -605,14 +594,6 @@ static ssize_t rpmsg_eptdev_write_iter(struct kiocb *iocb,
 	/*	goto unlock_eptdev;*/
 	}
 
-	/*if (filp->f_flags & O_NONBLOCK)
-		ret = rpmsg_trysendto(eptdev->ept, kbuf, len, eptdev->chinfo.dst);
-	else
-		ret = rpmsg_sendto(eptdev->ept, kbuf, len, eptdev->chinfo.dst);*/
-/*
-unlock_eptdev:
-	mutex_unlock(&eptdev->ept_lock);
-*/
 free_kbuf:
 	kfree(kbuf);
 	return ret < 0 ? ret : len;

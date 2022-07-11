@@ -8,8 +8,8 @@
 #include "r_taurus_bridge.h"
 
 typedef struct taurus_cluster_data {
-    int   speed;
-    int   rpm
+    int   value;
+    int   ioctl_cmd;
 }taurus_cluster_data_t;
 
 typedef struct taurus_cluster_res_msg {
